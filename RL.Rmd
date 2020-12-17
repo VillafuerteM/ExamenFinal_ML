@@ -1,0 +1,272 @@
+---
+title: "R Notebook"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r}
+library(MASS)
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(reticulate)
+library(GGally)
+library(tidymodels)
+library(knitr)
+```
+
+
+```{r}
+datos <- read.csv('default of credit card clients.csv', skip=1)
+datos <- datos %>% mutate(y=default.payment.next.month) %>% select(-ID,-default.payment.next.month)
+names(datos)
+head(datos)
+```
+```{r}
+set.seed(1234)
+datos_particion <- initial_split(datos, 0.85)
+entrenamiento<- training(datos_particion)
+prueba<- testing(datos_particion)
+```
+
+
+Función de sensibilidad
+```{r}
+sens <- function(tab)
+{
+  tabla <- as.data.frame.matrix(tab)
+  vp <- tabla[2,'1']
+  vp <- as.numeric(vp)
+  
+  fn <- tabla[1,'0']
+  fn <- as.numeric(fn)
+  
+  pos <- fn + vp
+  
+  return(round(vp/pos,4)*100)
+}
+```
+
+
+Función de exactitud
+```{r}
+exact <- function(table)
+{
+  d <- sum(diag(table))
+  tot <-  sum(table)     
+  
+  return(round(d/tot*100,2))
+}
+```
+
+
+
+
+A partir de aquí
+
+
+## Regresión Logística
+El primer modelo que implementamos para este proyecto fue el de **regresión logística**, en donde con el objetivo de lograr una mayor exactitud, se fueron ajustando diferentes modelos con base en la exploración previa de las variables. Lo que se hizo en primera instancia fue ajustar un modelo considerando las 24 variables de la base de datos.
+
+```{r}
+mAll  <- glm(y ~ .,data = entrenamiento, family = binomial(link = "logit"))
+
+summary(mAll)
+```
+Del resumen del ajuste se puede observar que no todas las variables son significativas; únicamente el balance límite, sexo, educación, estado marital, edad, pay_0, pay_2, bill_amt1, pay_amt1 y pay_amt2. Esta información resultará de utilidad más adelante cuando se ajusten otros modelos con diferentes variables.
+
+En cuanto a la visualización de las predicciones de este modelo, para darnos una idea de cuáles serían nos fijamos en los primeros 5 valores del conjunto de entrenamiento.
+```{r}
+pmAll <- predict(mAll, prueba, type="response")
+head(pmAll, 5)
+```
+
+Posteriormente para la asignación de etiquetas determinamos que si el valor de la predicción era mayor a 0.5 entonces se le asignaría la etiqueta $y=1$; es decir, *default payment*. Mientras que si la predicción asignaba un valor menor a 0.5, la etiqueta sería $y=0$ correspondiente a *not default payment*. Recordemos que como se mencionó en la exploración de datos, el $22\%$ de los datos correspondían a *default payments*
+```{r}
+epmAll <- ifelse(pmAll > 0.5, 1, 0)
+head(epmAll)
+```
+
+Para evaluar este primer modelo, presentamos su matriz de confusión:
+```{r}
+mAll_cm <- table(epmAll, prueba[,24])
+mAll_cm
+```
+
+Mediante la matriz presentada anteriormente obtuvimos la siguiente exactitud y sensibilidad:
+```{r}
+exact(mAll_cm)
+sens(mAll_cm)
+```
+Exactitud $79.91\%$\
+Sensibilidad $6.17\%$
+
+
+Con el fin de obtener un modelo que tuviera mayor exactitud, procedimos a indagar diferentes modelos cuyas variables diferían entre sí. Por ello, el segundo modelo de regresión logística que presentamos incluye 10 nuevas variables referentes al gasto promedio mensual y al porcentaje restante del límite de crédito. Tras la exploración de la base de datos consideramos que dichas variables podrían ser de utilidad para la obtención de un mejor modelo.
+
+```{r}
+datos = datos %>% mutate(MA = as.factor(as.numeric(SEX) * as.numeric(MARRIAGE)))
+
+# Gasto promedio por mes
+datos = datos %>% 
+  mutate(avg_exp5 = (BILL_AMT5 - BILL_AMT6 - PAY_AMT5) / LIMIT_BAL) %>%
+  mutate(avg_exp4 = 0.5*(BILL_AMT5 - BILL_AMT6 - PAY_AMT5  + 
+                           BILL_AMT4 - BILL_AMT5 - PAY_AMT4) / LIMIT_BAL) %>%
+  mutate(avg_exp3 = (BILL_AMT5 - BILL_AMT6 - PAY_AMT5  + 
+                           BILL_AMT4 - BILL_AMT5 - PAY_AMT4 + 
+                           BILL_AMT3 - BILL_AMT4 - PAY_AMT3) / (LIMIT_BAL * 3)) %>%
+  mutate(avg_exp2 = (BILL_AMT5 - BILL_AMT6 - PAY_AMT5  + 
+                           BILL_AMT4 - BILL_AMT5 - PAY_AMT4 + 
+                           BILL_AMT3 - BILL_AMT4 - PAY_AMT3 + 
+                           BILL_AMT2 - BILL_AMT3 - PAY_AMT2) / (LIMIT_BAL * 4)) %>% 
+  mutate(avg_exp1 = (BILL_AMT5 - BILL_AMT6 - PAY_AMT5  + 
+                           BILL_AMT4 - BILL_AMT5 - PAY_AMT4 + 
+                           BILL_AMT3 - BILL_AMT4 - PAY_AMT3 + 
+                           BILL_AMT2 - BILL_AMT3 - PAY_AMT2 + 
+                           BILL_AMT1 - BILL_AMT2 - PAY_AMT1) / (LIMIT_BAL * 5))
+
+# Qué tanto porcentaje queda del límite de crádito
+datos = datos %>% 
+  mutate(porc_noexp1 = (LIMIT_BAL - BILL_AMT2) / LIMIT_BAL) %>%
+  mutate(porc_noexp2 = (LIMIT_BAL - BILL_AMT3) / LIMIT_BAL) %>%
+  mutate(porc_noexp3 = (LIMIT_BAL - BILL_AMT4) / LIMIT_BAL) %>%
+  mutate(porc_noexp4 = (LIMIT_BAL - BILL_AMT5) / LIMIT_BAL) %>%
+  mutate(porc_noexp5 = (LIMIT_BAL - BILL_AMT6) / LIMIT_BAL)
+```
+
+Como los datos fueron modificados, nuevamente hacemos la partición con la misma semilla y porcentaje de datos para el conjunto de entrenamiento y el de prueba.
+```{r}
+set.seed(1234)
+datos_particion <- initial_split(datos, 0.85)
+entrenamiento<- training(datos_particion)
+prueba<- testing(datos_particion)
+
+dim(entrenamiento)
+dim(prueba)
+```
+Como era de esperarse, la única modificación resultante es que hay más variables.
+
+El resumen de este nuevo modelo arroja que hay menos variables significativas. Ahora, las más significativas son el límite de balance, educación, pay_0, pay_2, bill_amt1, pay_amt1 y pay_amt2; las variables sexo, estado marital y edad dejaron de ser tan significativas como en el modelo pasado.
+```{r}
+mG  <- glm(y ~ .,data = entrenamiento, family = binomial(link = "logit"))
+
+summary(mG)
+```
+
+Similarmente, las predicciones obtenidas mediante este modelo son:
+```{r}
+pmG <- predict(mG, prueba, type="response")
+
+head(pmG, 5)
+```
+
+Y nuevamente las 5 primeras etiquetas corresponden a $y=0$; es decir, *not default payment*
+```{r}
+epmG <- ifelse(pmG > 0.5, 1, 0)
+head(epmG)
+```
+
+
+Para la evaluación de este segundo modelo, presentamos su matriz de confusión:
+```{r}
+mG_cm <- table(epmG, prueba[,24])
+mG_cm
+```
+
+Mediante la matriz presentada anteriormente la exactitud y sensibilidad obtenida fue de:
+```{r}
+exact(mG_cm)
+sens(mG_cm)
+```
+Exactitud $79.67\%$\
+Sensibilidad $6\%$
+
+En comparación al modelo anterior, obtuvimos una ligera disminución en la exactitud y la sensibilidad mientras que el AIC del modelo ajustado a los datos de entrenamiento, también fue menor.
+
+
+Un tercer modelo de regresión logística que ajustamos considera únicamente las variables más significativas mencionadas en el segundo modelo; es decir, límite de balance, educación, pay_0, pay_2, bill_amt1, pay_amt1 y pay_amt2
+```{r}
+m2 <- as.formula("y ~ LIMIT_BAL + EDUCATION + PAY_0 + PAY_2 + BILL_AMT1 + PAY_AMT1 + PAY_AMT2")
+m2  <- glm(m2, data = entrenamiento, family = binomial(link = "logit"))
+summary(m2)
+```
+En primera instancia, veamos que el AIC de este ajuste de modelo es mayor que en los otros dos presentados anteriormente.
+
+Por otro lado, las predicciones obtenidas son:
+```{r}
+pm2 <- predict(m2, prueba, type="response")
+
+head(pm2, 5)
+```
+
+Otra vez las 5 primeras etiquetas corresponden a $y=0$; es decir, *not default payment*
+```{r}
+epm2 <- ifelse(pm2 > 0.5, 1, 0)
+head(epm2)
+```
+
+Para la evaluación de este modelo, obtuvimos a su matriz de confusión:
+```{r}
+m2_cm <- table(epm2, prueba[,24])
+m2_cm
+```
+
+Mediante la matriz de confusión la exactitud y sensibilidad obtenida fue de:
+```{r}
+exact(m2_cm)
+sens(m2_cm)
+```
+Exactitud $79.89\%$\
+Sensibilidad $6.15\%$ \
+
+Notemos que los valores de sensibilidad y exactitud obtenidos mediante este modelo se asemejan mucho a aquellos correspondientes al primer modelo.\
+
+Un último modelo ajustado de regresión logística corresponde a las mismas variables del modelo anterior pero con las segundas variables más significativas presentadas en el resumen del segundo modelo; es decir, edad y avg_exp2, el gasto promedio del segundo mes.
+```{r}
+m3 <- as.formula("y ~ LIMIT_BAL + EDUCATION + AGE + PAY_0 + PAY_2 + BILL_AMT1 + PAY_AMT1 + PAY_AMT2 + avg_exp2")
+m3  <- glm(m3, data = entrenamiento, family = binomial(link = "logit"))
+summary(m3)
+```
+Notemos que el AIC de este ajuste de modelo es menor que el del modelo anterior pero mayor que el de los primeros dos.
+
+En cuanto a las predicciones, lo que se obtuvo fue:
+```{r}
+pm3 <- predict(m3, prueba, type="response")
+
+head(pm3, 5)
+```
+
+Nuevamente las 5 primeras etiquetas corresponden a $y=0$; es decir, *not default payment*
+```{r}
+epm3 <- ifelse(pm3 > 0.5, 1, 0)
+head(epm3)
+```
+
+Para la evaluación de este último modelo, su matriz de confusión es:
+```{r}
+m3_cm <- table(epm3, prueba[,24])
+m3_cm
+```
+
+Mediante la matriz de confusión la exactitud y sensibilidad obtenida fue de:
+```{r}
+exact(m3_cm)
+sens(m3_cm)
+```
+Exactitud $79.84\%$\
+Sensibilidad $6.15\%$ \
+
+En relación al modelo pasado, la exactitud disminuyó en 5 centésimas y la sensibilidad se mantuvo en $6.15\%$
+
+Para facilitar la comparación entre los modelos ajustados, la exactitud y sensibilidad de los cuatro modelos de regresión logística presentados en esta sección se presentan en la tabla a continuación:
+```{r}
+sensEx <- data.frame(
+  'Modelo' = 1:4,
+  'Exactitud' = c(79.91,79.67,79.89,79.84),
+  'Sensibilidad' = c(6.17,6,6.15,6.15)
+)
+
+knitr::kable(sensEx,caption = '% de sensibilidad y exactitud' ,align = 'ccc')
+```
+
